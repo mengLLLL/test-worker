@@ -4,48 +4,55 @@ const path = require('path');
 
 const PORT = 3000;
 
-// MIME类型映射
-const MIME_TYPES = {
-    '.html': 'text/html',
-    '.css': 'text/css',
-    '.js': 'text/javascript',
-    '.json': 'application/json',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon'
-};
-
-// 创建HTTP服务器
 const server = http.createServer((req, res) => {
-    console.log(`请求: ${req.method} ${req.url}`);
+    let filePath = '.' + req.url;
     
-    // 处理根路径请求
-    let filePath = req.url === '/' ? '/index.html' : req.url;
-    
-    // 构建完整的文件路径
-    filePath = path.join(__dirname, filePath);
+    // 默认访问index.html
+    if (filePath === './') {
+        filePath = './index.html';
+    }
     
     // 获取文件扩展名
-    const extname = path.extname(filePath).toLowerCase();
+    const extname = path.extname(filePath);
     
-    // 获取MIME类型
-    const contentType = MIME_TYPES[extname] || 'application/octet-stream';
+    // 设置默认的MIME类型
+    let contentType = 'text/html';
+    
+    // 根据扩展名设置正确的MIME类型
+    switch (extname) {
+        case '.js':
+            contentType = 'text/javascript';
+            break;
+        case '.css':
+            contentType = 'text/css';
+            break;
+        case '.json':
+            contentType = 'application/json';
+            break;
+        case '.png':
+            contentType = 'image/png';
+            break;
+        case '.jpg':
+            contentType = 'image/jpg';
+            break;
+        case '.svg':
+            contentType = 'image/svg+xml';
+            break;
+    }
     
     // 读取文件
-    fs.readFile(filePath, (err, content) => {
-        if (err) {
-            if (err.code === 'ENOENT') {
+    fs.readFile(filePath, (error, content) => {
+        if (error) {
+            if (error.code === 'ENOENT') {
                 // 文件不存在
-                console.error(`文件不存在: ${filePath}`);
-                res.writeHead(404);
-                res.end('404 Not Found');
+                fs.readFile('./404.html', (error, content) => {
+                    res.writeHead(404, { 'Content-Type': 'text/html' });
+                    res.end(content, 'utf-8');
+                });
             } else {
                 // 服务器错误
-                console.error(`服务器错误: ${err.code}`);
                 res.writeHead(500);
-                res.end(`服务器错误: ${err.code}`);
+                res.end('服务器错误: ' + error.code);
             }
         } else {
             // 成功响应
@@ -55,8 +62,7 @@ const server = http.createServer((req, res) => {
     });
 });
 
-// 启动服务器
 server.listen(PORT, () => {
-    console.log(`服务器运行在 http://localhost:${PORT}`);
-    console.log('按 Ctrl+C 停止服务器');
+    console.log(`服务器运行在 http://localhost:${PORT}/`);
+    console.log(`访问 RxJS 仪表盘: http://localhost:${PORT}/angular-rxjs-dashboard.html`);
 });
