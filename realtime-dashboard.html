@@ -1,0 +1,1834 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Worker统一数据处理架构 - 多看板实时监控</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding: 20px; background-color: #f5f5f5; }
+        .card { margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .console {
+            background-color: #1e1e1e;
+            color: #ddd;
+            font-family: monospace;
+            padding: 10px;
+            height: 150px;
+            overflow-y: auto;
+        }
+        .log { margin-bottom: 5px; }
+        .log-info { color: #4CAF50; }
+        .log-warn { color: #FFC107; }
+        .log-error { color: #F44336; }
+        .chart-container {
+            width: 100%;
+            height: 200px;
+            position: relative;
+            overflow: hidden;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        .path {
+            fill: none;
+            stroke-width: 2px;
+        }
+        .path-main {
+            stroke: #2196F3;
+        }
+        .path-avg {
+            stroke: #FF5722;
+            stroke-dasharray: 5,5;
+        }
+        .axis {
+            stroke: #999;
+            stroke-width: 1px;
+        }
+        .axis-label {
+            fill: #666;
+            font-size: 12px;
+        }
+        .stats-card {
+            text-align: center;
+            padding: 15px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+        .stats-card .value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .stats-card .label {
+            font-size: 14px;
+            color: #666;
+        }
+        .stats-primary { background-color: #E3F2FD; color: #1565C0; }
+        .stats-success { background-color: #E8F5E9; color: #2E7D32; }
+        .stats-warning { background-color: #FFF8E1; color: #F57F17; }
+        .stats-info { background-color: #E0F7FA; color: #00838F; }
+        .dashboard-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 0;
+        }
+        .chart-tabs {
+            display: flex;
+            margin-bottom: 10px;
+        }
+        .chart-tab {
+            padding: 5px 10px;
+            cursor: pointer;
+            border: 1px solid #ddd;
+            border-radius: 4px 4px 0 0;
+            margin-right: 5px;
+        }
+        .chart-tab.active {
+            background-color: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+        #externalDataInput {
+            height: 120px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <h1 class="text-center my-4">Web Worker统一数据处理架构 - 多看板实时监控</h1>
+        
+        <!-- 控制面板与状态统计 -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">控制面板</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="workerCount" class="form-label">Worker线程数</label>
+                            <input type="number" class="form-control" id="workerCount" min="1" max="16" value="4">
+                        </div>
+                        <div class="mb-3">
+                            <label for="updateInterval" class="form-label">数据更新间隔(ms)</label>
+                            <input type="number" class="form-control" id="updateInterval" min="100" max="2000" value="200">
+                        </div>
+                        <div class="mb-3">
+                            <label for="cacheStrategy" class="form-label">缓存策略</label>
+                            <select class="form-control" id="cacheStrategy">
+                                <option value="sliding">滑动窗口(保留最新)</option>
+                                <option value="downsampling">降采样(全量简化)</option>
+                                <option value="priority">优先级(重要性保留)</option>
+                            </select>
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="errorSimulation">
+                            <label class="form-check-label" for="errorSimulation">
+                                模拟错误
+                            </label>
+                        </div>
+                        <div class="d-grid gap-2">
+                            <button id="startBtn" class="btn btn-success">开始处理</button>
+                            <button id="stopBtn" class="btn btn-danger" disabled>停止处理</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="row">
+                    <div class="col-md-4">
+                        <div class="card stats-card stats-primary">
+                            <div class="value" id="totalProcessed">0</div>
+                            <div class="label">已处理数据量</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card stats-card stats-success">
+                            <div class="value" id="avgValue">0</div>
+                            <div class="label">平均值</div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card stats-card stats-warning">
+                            <div class="value" id="maxValue">0</div>
+                            <div class="label">最大值</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="row mt-3">
+                    <div class="col-md-6">
+                        <div class="card stats-card stats-info">
+                            <div class="value" id="processSpeed">0</div>
+                            <div class="label">处理速度(条/秒)</div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card stats-card stats-primary">
+                            <div class="value" id="totalErrors">0</div>
+                            <div class="label">错误数</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-3">
+                <div class="card h-100">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0">导入外部数据</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="targetDashboard" class="form-label">目标看板</label>
+                            <select class="form-control" id="targetDashboard">
+                                <option value="1">CPU使用率</option>
+                                <option value="2">内存使用率</option>
+                                <option value="3">网络流量</option>
+                                <option value="4">磁盘IO</option>
+                                <option value="5">API响应时间</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="externalDataInput" class="form-label">JSON数据</label>
+                            <textarea class="form-control" id="externalDataInput" placeholder='[{"value": 75}, {"value": 80}]'></textarea>
+                        </div>
+                        <div class="d-grid">
+                            <button id="importBtn" class="btn btn-info">导入数据</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 图表与数据可视化 - 5个看板 -->
+        <div class="row">
+            <!-- 看板1：CPU使用率 -->
+            <div class="col-md-6 mb-4">
+                <div class="card">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                        <h5 class="dashboard-title mb-0">CPU使用率</h5>
+                        <div class="d-flex">
+                            <div class="me-3">
+                                <span class="badge bg-primary">当前值</span>
+                            </div>
+                            <div>
+                                <span class="badge bg-danger">平均值</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="chart-container" id="chartContainer1">
+                            <!-- SVG图表会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 看板2：内存使用率 -->
+            <div class="col-md-6 mb-4">
+                <div class="card">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                        <h5 class="dashboard-title mb-0">内存使用率</h5>
+                        <div class="d-flex">
+                            <div class="me-3">
+                                <span class="badge bg-primary">当前值</span>
+                            </div>
+                            <div>
+                                <span class="badge bg-danger">平均值</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="chart-container" id="chartContainer2">
+                            <!-- SVG图表会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 看板3：网络流量 -->
+            <div class="col-md-4 mb-4">
+                <div class="card">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                        <h5 class="dashboard-title mb-0">网络流量</h5>
+                        <div class="d-flex">
+                            <div class="me-3">
+                                <span class="badge bg-primary">当前值</span>
+                            </div>
+                            <div>
+                                <span class="badge bg-danger">平均值</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="chart-container" id="chartContainer3">
+                            <!-- SVG图表会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 看板4：磁盘IO -->
+            <div class="col-md-4 mb-4">
+                <div class="card">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                        <h5 class="dashboard-title mb-0">磁盘IO</h5>
+                        <div class="d-flex">
+                            <div class="me-3">
+                                <span class="badge bg-primary">当前值</span>
+                            </div>
+                            <div>
+                                <span class="badge bg-danger">平均值</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="chart-container" id="chartContainer4">
+                            <!-- SVG图表会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 看板5：API响应时间 -->
+            <div class="col-md-4 mb-4">
+                <div class="card">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                        <h5 class="dashboard-title mb-0">API响应时间</h5>
+                        <div class="d-flex">
+                            <div class="me-3">
+                                <span class="badge bg-primary">当前值</span>
+                            </div>
+                            <div>
+                                <span class="badge bg-danger">平均值</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="chart-container" id="chartContainer5">
+                            <!-- SVG图表会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Worker状态和处理详情 -->
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-secondary text-white">
+                        <h5 class="mb-0">Worker池状态</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row" id="workerStatus">
+                            <!-- Worker状态会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header bg-dark text-white">
+                        <h5 class="mb-0">系统日志</h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="console" id="logConsole">
+                            <!-- 日志会动态插入这里 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        /**
+         * 多流数据管理器
+         * 负责生成和管理多个数据流
+         */
+        class DataManager {
+            constructor(dashboardCount = 5, initialSize = 10000) {
+                this.dashboardCount = dashboardCount;
+                // 为每个看板创建独立的数据流
+                this.dataStreams = {};
+                this.dataTypes = []; // 存储所有数据类型
+                
+                // 统一的数据配置结构
+                this.streamConfig = {
+                    min: 0,
+                    max: 100,
+                    volatility: 10,
+                    unit: '值'
+                };
+                
+                // 创建看板配置
+                for (let i = 0; i < this.dashboardCount; i++) {
+                    const dataType = `dataStream${i+1}`;
+                    this.dataTypes.push(dataType);
+                    
+                    this.dataStreams[dataType] = {
+                        data: [],                // 完整数据
+                        displayData: [],         // 用于显示的数据（可能是降采样后的）
+                        lastValue: 50,           // 上一个值
+                        avgValue: 0,             // 平均值
+                        maxValue: 0,             // 最大值
+                        totalPoints: 0,          // 总数据点数
+                        name: `数据流 ${i+1}`,    // 显示名称
+                        unit: this.streamConfig.unit, // 单位
+                        listeners: [],           // 监听器
+                        priority: []             // 数据点优先级（用于智能缓存）
+                    };
+                    
+                    this.generateInitialData(dataType, initialSize);
+                }
+                
+                this.cacheStrategy = 'sliding'; // 默认缓存策略：滑动窗口
+                this.maxCacheSize = 15000;      // 每个流的最大缓存大小
+                this.maxDisplayPoints = 1000;   // 最大显示点数
+                
+                // 缓存控制参数
+                this.downsamplingFactor = 5;    // 降采样因子（每N个点保留1个）
+                this.priorityThreshold = 0.7;   // 优先级阈值（保留高于此优先级的点）
+            }
+            
+            // 设置缓存策略
+            setCacheStrategy(strategy) {
+                this.cacheStrategy = strategy;
+                log(`已设置缓存策略: ${strategy}`, 'info');
+                
+                // 对所有现有数据应用新的缓存策略
+                for (const dataType of this.dataTypes) {
+                    if (this.dataStreams[dataType]) {
+                        this.applyDataCacheStrategy(dataType);
+                    }
+                }
+            }
+            
+            // 为特定流生成初始数据集
+            generateInitialData(dataType, size) {
+                const stream = this.dataStreams[dataType];
+                if (!stream) return;
+                
+                stream.data = [];
+                let value = 50; // 初始值从中间值开始
+                
+                for (let i = 0; i < size; i++) {
+                    // 生成下一个值，所有数据类型使用相同的生成逻辑
+                    value = this.generateNextValue(value, i);
+                    
+                    stream.data.push({
+                        id: `${dataType}-${i}`,
+                        timestamp: Date.now() - (size - i) * 100, // 数据从过去到现在的时间戳
+                        value: value,
+                        originalIndex: i,
+                        priority: this.calculatePriority(value, stream.data) // 计算优先级
+                    });
+                }
+                
+                stream.lastValue = value;
+                stream.totalPoints = size;
+                
+                // 应用缓存策略
+                this.applyDataCacheStrategy(dataType);
+                
+                // 更新统计
+                this.updateStats(dataType);
+            }
+            
+            // 生成下一个数据值，统一的数据生成逻辑
+            generateNextValue(currentValue, index) {
+                // 通用的波动生成逻辑
+                const volatility = this.streamConfig.volatility;
+                const randomChange = (Math.random() * 2 - 1) * volatility;
+                
+                // 添加一些周期性趋势
+                const cyclicComponent = Math.sin(index * 0.01) * volatility;
+                
+                let nextValue = currentValue + randomChange + cyclicComponent * 0.1;
+                
+                // 确保值在范围内
+                return Math.max(this.streamConfig.min, Math.min(this.streamConfig.max, nextValue));
+            }
+            
+            // 计算数据点的优先级（用于智能缓存）
+            calculatePriority(value, existingData) {
+                if (!existingData || existingData.length === 0) {
+                    return 1.0; // 首个点优先级最高
+                }
+                
+                let priority = 0;
+                
+                // 1. 值变化率（大的变化有更高优先级）
+                if (existingData.length > 1) {
+                    const lastPoint = existingData[existingData.length - 1];
+                    const changeRate = Math.abs(value - lastPoint.value) / (this.streamConfig.max - this.streamConfig.min);
+                    priority += changeRate * 0.4; // 变化率权重40%
+                }
+                
+                // 2. 异常值检测（偏离平均值较多的点有更高优先级）
+                if (existingData.length > 10) {
+                    const recentPoints = existingData.slice(Math.max(0, existingData.length - 10));
+                    const avg = recentPoints.reduce((sum, pt) => sum + pt.value, 0) / recentPoints.length;
+                    const std = Math.sqrt(recentPoints.reduce((sum, pt) => sum + Math.pow(pt.value - avg, 2), 0) / recentPoints.length);
+                    
+                    const zScore = Math.abs(value - avg) / (std || 1);
+                    const anomalyScore = Math.min(zScore / 3, 1); // 标准化异常分数
+                    priority += anomalyScore * 0.4; // 异常值权重40%
+                }
+                
+                // 3. 时间因子（较新的数据有更高优先级）
+                priority += 0.2; // 基础时间优先级20%
+                
+                return Math.min(1, priority);
+            }
+            
+            // 为特定流生成一批新数据
+            generateNewData(dataType, count = 10) {
+                const stream = this.dataStreams[dataType];
+                if (!stream) return [];
+                
+                const newData = [];
+                let value = stream.lastValue;
+                
+                for (let i = 0; i < count; i++) {
+                    // 生成下一个值
+                    value = this.generateNextValue(value, stream.totalPoints + i);
+                    
+                    newData.push({
+                        id: `${dataType}-${Date.now()}-${i}`,
+                        timestamp: Date.now() + i * 10, // 当前时间戳
+                        value: value,
+                        originalIndex: stream.totalPoints + i,
+                        priority: this.calculatePriority(value, stream.data)
+                    });
+                }
+                
+                // 更新最后的值
+                stream.lastValue = value;
+                stream.totalPoints += count;
+                
+                // 添加新数据到数据集
+                stream.data = [...stream.data, ...newData];
+                
+                // 应用缓存策略
+                this.applyDataCacheStrategy(dataType);
+                
+                // 更新统计信息
+                this.updateStats(dataType);
+                
+                // 通知监听器
+                this.notifyListeners(dataType, newData);
+                
+                return newData;
+            }
+            
+            // 应用数据缓存策略
+            applyDataCacheStrategy(dataType) {
+                const stream = this.dataStreams[dataType];
+                if (!stream) return;
+                
+                switch (this.cacheStrategy) {
+                    case 'sliding':
+                        // 滑动窗口策略 - 保留最新的N个点
+                        if (stream.data.length > this.maxCacheSize) {
+                            stream.data = stream.data.slice(stream.data.length - this.maxCacheSize);
+                        }
+                        // 用于显示的数据也是最新的点
+                        stream.displayData = stream.data.slice(Math.max(0, stream.data.length - this.maxDisplayPoints));
+                        break;
+                        
+                    case 'downsampling':
+                        // 降采样策略 - 保留全部时间范围，但减少点数
+                        if (stream.data.length > this.maxCacheSize) {
+                            // 对旧数据进行降采样，保留最新的数据
+                            const newPoints = stream.data.slice(stream.data.length - this.maxDisplayPoints);
+                            const oldPoints = stream.data.slice(0, stream.data.length - this.maxDisplayPoints);
+                            
+                            // 对旧数据降采样
+                            const downsampledOldPoints = [];
+                            for (let i = 0; i < oldPoints.length; i += this.downsamplingFactor) {
+                                downsampledOldPoints.push(oldPoints[i]);
+                            }
+                            
+                            stream.data = [...downsampledOldPoints, ...newPoints];
+                            
+                            // 如果仍然超过最大缓存，从最旧的开始丢弃
+                            if (stream.data.length > this.maxCacheSize) {
+                                stream.data = stream.data.slice(stream.data.length - this.maxCacheSize);
+                            }
+                        }
+                        
+                        // 为显示再次降采样
+                        if (stream.data.length > this.maxDisplayPoints) {
+                            const factor = Math.ceil(stream.data.length / this.maxDisplayPoints);
+                            stream.displayData = [];
+                            for (let i = 0; i < stream.data.length; i += factor) {
+                                stream.displayData.push(stream.data[i]);
+                            }
+                        } else {
+                            stream.displayData = [...stream.data];
+                        }
+                        break;
+                        
+                    case 'priority':
+                        // 优先级策略 - 根据重要性保留数据点
+                        if (stream.data.length > this.maxCacheSize) {
+                            // 按优先级排序
+                            const sortedData = [...stream.data];
+                            sortedData.sort((a, b) => b.priority - a.priority);
+                            
+                            // 保留高优先级的点和最新的点
+                            const highPriorityPoints = sortedData
+                                .filter(point => point.priority > this.priorityThreshold)
+                                .slice(0, this.maxCacheSize * 0.7); // 70%容量给高优先级点
+                                
+                            // 最新的点
+                            const recentPoints = stream.data.slice(stream.data.length - Math.floor(this.maxCacheSize * 0.3));
+                            
+                            // 合并并按时间排序
+                            const combinedPoints = [...highPriorityPoints, ...recentPoints];
+                            // 去重
+                            const uniqueIds = new Set();
+                            stream.data = combinedPoints
+                                .filter(point => {
+                                    if (uniqueIds.has(point.id)) return false;
+                                    uniqueIds.add(point.id);
+                                    return true;
+                                })
+                                .sort((a, b) => a.originalIndex - b.originalIndex);
+                            
+                            // 确保不超过最大缓存
+                            if (stream.data.length > this.maxCacheSize) {
+                                stream.data = stream.data.slice(stream.data.length - this.maxCacheSize);
+                            }
+                        }
+                        
+                        // 为显示选择最近的点和高优先级的点
+                        if (stream.data.length > this.maxDisplayPoints) {
+                            // 获取最近的点
+                            const recentPoints = stream.data.slice(stream.data.length - Math.floor(this.maxDisplayPoints * 0.7));
+                            
+                            // 获取剩余点中优先级最高的点
+                            const remainingPoints = stream.data.slice(0, stream.data.length - recentPoints.length);
+                            remainingPoints.sort((a, b) => b.priority - a.priority);
+                            const highPriorityOlderPoints = remainingPoints.slice(0, this.maxDisplayPoints - recentPoints.length);
+                            
+                            // 合并并按时间排序
+                            stream.displayData = [...highPriorityOlderPoints, ...recentPoints]
+                                .sort((a, b) => a.originalIndex - b.originalIndex);
+                        } else {
+                            stream.displayData = [...stream.data];
+                        }
+                        break;
+                }
+            }
+            
+            // 获取特定流的显示数据
+            getDisplayData(dataType) {
+                const stream = this.dataStreams[dataType];
+                return stream ? [...stream.displayData] : [];
+            }
+            
+            // 获取全量数据
+            getAllData(dataType) {
+                const stream = this.dataStreams[dataType];
+                return stream ? [...stream.data] : [];
+            }
+            
+            // 更新特定流的统计信息
+            updateStats(dataType) {
+                const stream = this.dataStreams[dataType];
+                if (!stream || stream.data.length === 0) return;
+                
+                const sum = stream.data.reduce((acc, item) => acc + item.value, 0);
+                stream.avgValue = sum / stream.data.length;
+                stream.maxValue = Math.max(...stream.data.map(item => item.value));
+            }
+            
+            // 添加数据更新监听器
+            addListener(dataType, callback) {
+                const stream = this.dataStreams[dataType];
+                if (stream) {
+                    stream.listeners.push(callback);
+                }
+            }
+            
+            // 移除监听器
+            removeListener(dataType, callback) {
+                const stream = this.dataStreams[dataType];
+                if (stream) {
+                    stream.listeners = stream.listeners.filter(listener => listener !== callback);
+                }
+            }
+            
+            // 通知所有监听器
+            notifyListeners(dataType, newData) {
+                const stream = this.dataStreams[dataType];
+                if (!stream) return;
+                
+                stream.listeners.forEach(callback => {
+                    try {
+                        callback(newData, stream.displayData, dataType);
+                    } catch (error) {
+                        console.error(`数据监听器错误 (${dataType}):`, error);
+                    }
+                });
+            }
+            
+            // 获取特定流的统计信息
+            getStreamStats(dataType) {
+                const stream = this.dataStreams[dataType];
+                if (!stream) return {};
+                
+                return {
+                    avgValue: stream.avgValue,
+                    maxValue: stream.maxValue,
+                    totalPoints: stream.totalPoints,
+                    cacheSize: stream.data.length,
+                    displaySize: stream.displayData.length,
+                    name: stream.name,
+                    unit: stream.unit
+                };
+            }
+            
+            // 批量导入外部数据
+            importExternalData(dataType, externalData) {
+                // 实际场景中，这里将处理从后端API获取的数据
+                // 本例中我们模拟这个过程
+                const stream = this.dataStreams[dataType];
+                if (!stream) return;
+                
+                const importedData = externalData.map((item, index) => ({
+                    id: `${dataType}-imported-${Date.now()}-${index}`,
+                    timestamp: item.timestamp || Date.now() + index * 10,
+                    value: item.value,
+                    originalIndex: stream.totalPoints + index,
+                    priority: this.calculatePriority(item.value, stream.data)
+                }));
+                
+                // 添加到数据集
+                stream.data = [...stream.data, ...importedData];
+                stream.lastValue = importedData[importedData.length - 1].value;
+                stream.totalPoints += importedData.length;
+                
+                // 应用缓存策略
+                this.applyDataCacheStrategy(dataType);
+                
+                // 更新统计
+                this.updateStats(dataType);
+                
+                // 通知监听器
+                this.notifyListeners(dataType, importedData);
+                
+                return importedData;
+            }
+            
+            // 设置数据面板信息
+            setDashboardInfo(dataType, name, unit) {
+                const stream = this.dataStreams[dataType];
+                if (stream) {
+                    stream.name = name;
+                    stream.unit = unit;
+                }
+            }
+        }
+        
+        /**
+         * Worker处理池
+         * 管理和调度WebWorker线程，统一处理各类数据
+         */
+        class WorkerPool {
+            constructor(workerCount, dataTypes) {
+                this.workerCount = workerCount;
+                this.workers = [];
+                this.taskQueues = {};  // 每个数据流有独立的任务队列
+                this.busyWorkers = 0;
+                
+                // 每个数据流的处理统计
+                this.streamStats = {};
+                this.dataTypes = dataTypes || [];
+                
+                // 初始化每个数据流的统计和队列
+                for (const dataType of this.dataTypes) {
+                    this.taskQueues[dataType] = [];
+                    this.streamStats[dataType] = {
+                        totalProcessed: 0,
+                        errorCount: 0,
+                        processedPerSecond: 0,
+                        lastSecondCount: 0,
+                        lastCounterReset: Date.now(),
+                        processingTime: [] // 最近10次处理时间，用于性能分析
+                    };
+                }
+                
+                this.running = false;
+                this.statusListeners = [];
+                this.taskIdCounter = 0;      // 任务ID计数器
+                
+                this.initWorkers();
+                
+                // 每秒更新处理速度
+                setInterval(() => {
+                    const now = Date.now();
+                    
+                    for (const dataType of this.dataTypes) {
+                        const stats = this.streamStats[dataType];
+                        if (stats) {
+                            const elapsed = (now - stats.lastCounterReset) / 1000;
+                            stats.processedPerSecond = Math.round(stats.lastSecondCount / elapsed);
+                            stats.lastSecondCount = 0;
+                            stats.lastCounterReset = now;
+                        }
+                    }
+                    
+                    this.notifyStatusChange();
+                }, 1000);
+            }
+            
+            initWorkers() {
+                log(`初始化 ${this.workerCount} 个Worker线程...`, 'info');
+                
+                // 创建Worker代码 - 统一处理逻辑
+                const workerCode = `
+                    // 统一数据处理函数
+                    function processData(dataArray, dataType, simulateError) {
+                        // 提取值数组
+                        const values = dataArray.map(item => item.value);
+                        
+                        // 计算统计数据
+                        const sum = values.reduce((acc, val) => acc + val, 0);
+                        const avg = sum / values.length;
+                        const max = Math.max(...values);
+                        const min = Math.min(...values);
+                        
+                        // 标准化处理 - 所有类型数据使用相同的处理逻辑
+                        const processedData = dataArray.map(item => {
+                            // 计算归一化值(0-100)
+                            const normalizedValue = (item.value - min) / (max - min || 1) * 100;
+                            
+                            // 计算与均值的差异
+                            const deviation = item.value - avg;
+                            
+                            // 计算变化率(相对于前一个值)
+                            const prevValue = values[values.indexOf(item.value) - 1];
+                            const changeRate = prevValue ? (item.value - prevValue) / prevValue : 0;
+                            
+                            // 计算z-score，用于异常值检测
+                            const stdDev = Math.sqrt(values.reduce((s, v) => s + Math.pow(v - avg, 2), 0) / values.length);
+                            const zScore = (item.value - avg) / (stdDev || 1);
+                            
+                            // 检测临界值
+                            const thresholdValues = {
+                                isHigh: item.value > avg * 1.5,
+                                isLow: item.value < avg * 0.5,
+                                isOutlier: Math.abs(zScore) > 2
+                            };
+                            
+                            return {
+                                id: item.id,
+                                timestamp: item.timestamp,
+                                originalValue: item.value,
+                                normalizedValue: normalizedValue,
+                                deviation: deviation,
+                                changeRate: changeRate,
+                                zScore: zScore,
+                                thresholds: thresholdValues
+                            };
+                        });
+                        
+                        // 模拟计算耗时 - 统一处理逻辑
+                        const startTime = Date.now();
+                        const processingTime = Math.random() * 30 + 20; // 20-50ms的处理时间
+                        
+                        while (Date.now() - startTime < processingTime) {
+                            // 模拟繁重计算
+                        }
+                        
+                        // 模拟随机错误(3%概率)
+                        if (simulateError && Math.random() < 0.03) {
+                            throw new Error(dataType + "数据处理中的模拟随机错误");
+                        }
+                        
+                        return {
+                            processedData: processedData,
+                            stats: {
+                                count: values.length,
+                                sum: sum,
+                                avg: avg,
+                                max: max,
+                                min: min,
+                                processingTime: Date.now() - startTime,
+                                dataType: dataType
+                            }
+                        };
+                    }
+                    
+                    // 监听消息
+                    self.onmessage = function(e) {
+                        try {
+                            const result = processData(e.data.data, e.data.dataType, e.data.simulateError);
+                            self.postMessage({
+                                success: true,
+                                result: result,
+                                taskId: e.data.taskId,
+                                workerId: e.data.workerId,
+                                dataType: e.data.dataType,
+                                dataCount: e.data.data.length,
+                                timestamp: Date.now()
+                            });
+                        } catch (error) {
+                            self.postMessage({
+                                success: false,
+                                error: error.message,
+                                taskId: e.data.taskId,
+                                workerId: e.data.workerId,
+                                dataType: e.data.dataType,
+                                dataCount: e.data.data ? e.data.data.length : 0,
+                                timestamp: Date.now()
+                            });
+                        }
+                    };
+                `;
+                
+                // 创建Worker的Blob URL
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                const workerUrl = URL.createObjectURL(blob);
+                
+                // 创建Worker实例
+                for (let i = 0; i < this.workerCount; i++) {
+                    try {
+                        const worker = new Worker(workerUrl);
+                        worker.id = i;
+                        worker.busy = false;
+                        worker.currentTask = null; // 当前正在处理的任务
+                        
+                        worker.onmessage = (e) => {
+                            const data = e.data;
+                            const workerId = data.workerId;
+                            const dataType = data.dataType;
+                            
+                            // 更新Worker状态
+                            this.workers[workerId].busy = false;
+                            this.workers[workerId].currentTask = null;
+                            this.busyWorkers--;
+                            
+                            // 更新统计信息
+                            if (data.success) {
+                                const stats = this.streamStats[dataType];
+                                if (stats) {
+                                    stats.totalProcessed += data.dataCount;
+                                    stats.lastSecondCount += data.dataCount;
+                                    
+                                    // 更新处理时间统计
+                                    const processingTime = data.result.stats.processingTime;
+                                    stats.processingTime.push(processingTime);
+                                    if (stats.processingTime.length > 10) {
+                                        stats.processingTime.shift();
+                                    }
+                                }
+                                
+                                log(`Worker #${workerId} 处理完成: ${data.dataCount} 条 ${dataType} 数据`, 'info');
+                            } else {
+                                const stats = this.streamStats[dataType];
+                                if (stats) {
+                                    stats.errorCount++;
+                                }
+                                log(`Worker #${workerId} 处理 ${dataType} 数据出错: ${data.error}`, 'error');
+                            }
+                            
+                            this.notifyStatusChange();
+                            this.processNextTask();
+                        };
+                        
+                        worker.onerror = (error) => {
+                            const workerId = this.workers.findIndex(w => w === worker);
+                            if (workerId >= 0) {
+                                this.workers[workerId].busy = false;
+                                this.workers[workerId].currentTask = null;
+                                this.busyWorkers--;
+                                
+                                // 如果当前有处理任务，记录错误
+                                if (this.workers[workerId].currentTask) {
+                                    const dataType = this.workers[workerId].currentTask.dataType;
+                                    const stats = this.streamStats[dataType];
+                                    if (stats) {
+                                        stats.errorCount++;
+                                    }
+                                }
+                                
+                                log(`Worker #${workerId} 错误: ${error.message}`, 'error');
+                                this.notifyStatusChange();
+                                this.processNextTask();
+                            }
+                        };
+                        
+                        this.workers.push(worker);
+                        log(`Worker #${i} 已创建并准备就绪`, 'info');
+                    } catch (error) {
+                        log(`创建Worker #${i} 失败: ${error.message}`, 'error');
+                    }
+                }
+                
+                this.notifyStatusChange();
+            }
+            
+            // 更新数据类型列表
+            updateDataTypes(dataTypes) {
+                // 添加新的数据类型
+                for (const dataType of dataTypes) {
+                    if (!this.dataTypes.includes(dataType)) {
+                        this.dataTypes.push(dataType);
+                        
+                        // 初始化新类型的队列和统计
+                        this.taskQueues[dataType] = [];
+                        this.streamStats[dataType] = {
+                            totalProcessed: 0,
+                            errorCount: 0,
+                            processedPerSecond: 0,
+                            lastSecondCount: 0,
+                            lastCounterReset: Date.now(),
+                            processingTime: []
+                        };
+                    }
+                }
+            }
+            
+            // 添加数据处理任务
+            processData(dataType, data, simulateError = false) {
+                if (!this.running || !data || data.length === 0 || !this.dataTypes.includes(dataType)) return;
+                
+                // 每次处理50条数据
+                const batchSize = 50;
+                
+                // 将数据分批
+                for (let i = 0; i < data.length; i += batchSize) {
+                    const batch = data.slice(i, i + batchSize);
+                    
+                    const task = {
+                        taskId: 'task-' + dataType + '-' + this.taskIdCounter++,
+                        dataType: dataType,
+                        data: batch,
+                        simulateError: simulateError,
+                        timestamp: Date.now()
+                    };
+                    
+                    this.taskQueues[dataType].push(task);
+                }
+                
+                this.processNextTask();
+            }
+            
+            // 获取平均处理时间
+            getAverageProcessingTime(dataType) {
+                const times = this.streamStats[dataType]?.processingTime || [];
+                if (times.length === 0) return 50; // 默认假设50ms
+                
+                return times.reduce((sum, time) => sum + time, 0) / times.length;
+            }
+            
+            // 处理下一个任务 - 简化为FIFO调度
+            processNextTask() {
+                if (!this.running) return;
+                
+                // 获取空闲的Worker
+                const availableWorkers = this.workers.filter(worker => !worker.busy);
+                if (availableWorkers.length === 0) return;
+                
+                // 遍历所有队列，按先进先出(FIFO)原则处理任务
+                for (const dataType of this.dataTypes) {
+                    const queue = this.taskQueues[dataType];
+                    if (queue.length === 0) continue;
+                    
+                    // 获取队列中的第一个任务(最早加入的)
+                    const task = queue.shift();
+                    
+                    // 选择第一个空闲的Worker
+                    const worker = availableWorkers[0];
+                    
+                    worker.busy = true;
+                    worker.currentTask = task;
+                    this.busyWorkers++;
+                    
+                    worker.postMessage({
+                        ...task,
+                        workerId: worker.id
+                    });
+                    
+                    log(`分配 ${task.dataType} 任务到Worker #${worker.id}, 数据量: ${task.data.length}`, 'info');
+                    
+                    // 处理完一个任务后退出，等待下一次调用
+                    break;
+                }
+                
+                this.notifyStatusChange();
+                
+                // 如果还有空闲Worker和待处理任务，继续处理
+                if (availableWorkers.length > 1) {
+                    // 检查是否还有任务
+                    let hasPendingTasks = false;
+                    for (const dataType of this.dataTypes) {
+                        if (this.taskQueues[dataType].length > 0) {
+                            hasPendingTasks = true;
+                            break;
+                        }
+                    }
+                    
+                    if (hasPendingTasks) {
+                        this.processNextTask();
+                    }
+                }
+            }
+            
+            // 启动处理系统
+            start() {
+                this.running = true;
+                log('Worker处理系统已启动', 'info');
+                this.processNextTask(); // 处理可能已在队列中的任务
+            }
+            
+            // 停止处理系统
+            stop() {
+                this.running = false;
+                
+                // 清空所有队列
+                for (const dataType of this.dataTypes) {
+                    this.taskQueues[dataType] = [];
+                }
+                
+                log('Worker处理系统已停止', 'info');
+                this.notifyStatusChange();
+            }
+            
+            // 添加状态变化监听器
+            addStatusListener(callback) {
+                this.statusListeners.push(callback);
+            }
+            
+            // 移除状态监听器
+            removeStatusListener(callback) {
+                this.statusListeners = this.statusListeners.filter(listener => listener !== callback);
+            }
+            
+            // 通知状态变化
+            notifyStatusChange() {
+                const status = {
+                    workers: this.workers.map(worker => ({
+                        id: worker.id,
+                        busy: worker.busy,
+                        currentTask: worker.currentTask ? {
+                            dataType: worker.currentTask.dataType,
+                            dataCount: worker.currentTask.data.length
+                        } : null
+                    })),
+                    busyWorkers: this.busyWorkers,
+                    queueLengths: {},
+                    streamStats: {}
+                };
+                
+                // 添加队列长度信息
+                for (const dataType of this.dataTypes) {
+                    status.queueLengths[dataType] = this.taskQueues[dataType]?.length || 0;
+                    status.streamStats[dataType] = {
+                        totalProcessed: this.streamStats[dataType]?.totalProcessed || 0,
+                        errorCount: this.streamStats[dataType]?.errorCount || 0,
+                        processedPerSecond: this.streamStats[dataType]?.processedPerSecond || 0,
+                        avgProcessingTime: this.getAverageProcessingTime(dataType)
+                    };
+                }
+                
+                this.statusListeners.forEach(callback => {
+                    try {
+                        callback(status);
+                    } catch (error) {
+                        console.error('状态监听器错误:', error);
+                    }
+                });
+            }
+            
+            // 终止和清理
+            terminate() {
+                this.stop();
+                this.workers.forEach(worker => worker.terminate());
+                this.workers = [];
+                this.busyWorkers = 0;
+                
+                for (const dataType of this.dataTypes) {
+                    this.taskQueues[dataType] = [];
+                }
+                
+                this.notifyStatusChange();
+                log('Worker处理系统已终止和清理', 'info');
+            }
+            
+            // 获取所有数据流的统计信息
+            getAllStreamStats() {
+                const stats = {};
+                
+                for (const dataType of this.dataTypes) {
+                    stats[dataType] = {
+                        totalProcessed: this.streamStats[dataType]?.totalProcessed || 0,
+                        errorCount: this.streamStats[dataType]?.errorCount || 0,
+                        processedPerSecond: this.streamStats[dataType]?.processedPerSecond || 0,
+                        queueLength: this.taskQueues[dataType]?.length || 0,
+                        avgProcessingTime: this.getAverageProcessingTime(dataType)
+                    };
+                }
+                
+                return stats;
+            }
+        }
+
+        /**
+         * 数据可视化管理器
+         * 负责渲染和更新实时数据流图表
+         */
+        class VisualizationManager {
+            constructor(containerId, streamType, streamConfig) {
+                this.container = document.getElementById(containerId);
+                this.streamType = streamType;
+                this.streamConfig = streamConfig;
+                this.width = this.container.clientWidth;
+                this.height = this.container.clientHeight;
+                this.data = [];
+                this.avgData = [];
+                this.svgNS = "http://www.w3.org/2000/svg";
+                this.maxDataPoints = 500; // 每个图表显示点数较少，优化性能
+                this.pathElement = null;
+                this.avgPathElement = null;
+                this.animationFrame = null;
+                this.lastRenderTime = 0;
+                this.pendingUpdate = false;
+                
+                this.initSVG();
+                
+                // 监听窗口大小变化
+                window.addEventListener('resize', () => {
+                    this.width = this.container.clientWidth;
+                    this.height = this.container.clientHeight;
+                    this.updateSVGSize();
+                    this.redrawChart();
+                });
+            }
+            
+            // 初始化SVG元素
+            initSVG() {
+                this.svg = document.createElementNS(this.svgNS, "svg");
+                this.svg.setAttribute("width", this.width);
+                this.svg.setAttribute("height", this.height);
+                
+                // 创建坐标轴
+                const xAxis = document.createElementNS(this.svgNS, "line");
+                xAxis.setAttribute("x1", "0");
+                xAxis.setAttribute("y1", this.height - 20);
+                xAxis.setAttribute("x2", this.width);
+                xAxis.setAttribute("y2", this.height - 20);
+                xAxis.setAttribute("class", "axis");
+                
+                const yAxis = document.createElementNS(this.svgNS, "line");
+                yAxis.setAttribute("x1", "40");
+                yAxis.setAttribute("y1", "0");
+                yAxis.setAttribute("x2", "40");
+                yAxis.setAttribute("y2", this.height - 20);
+                yAxis.setAttribute("class", "axis");
+                
+                // 添加单位标签
+                const unitLabel = document.createElementNS(this.svgNS, "text");
+                unitLabel.setAttribute("x", "45");
+                unitLabel.setAttribute("y", "15");
+                unitLabel.setAttribute("class", "axis-label");
+                unitLabel.textContent = this.streamConfig.unit || '';
+                
+                // 添加Y轴刻度
+                for (let i = 0; i <= 10; i++) {
+                    const yPos = this.height - 20 - (i * (this.height - 40) / 10);
+                    
+                    const tick = document.createElementNS(this.svgNS, "line");
+                    tick.setAttribute("x1", "35");
+                    tick.setAttribute("y1", yPos);
+                    tick.setAttribute("x2", "45");
+                    tick.setAttribute("y2", yPos);
+                    tick.setAttribute("class", "axis");
+                    
+                    const label = document.createElementNS(this.svgNS, "text");
+                    label.setAttribute("x", "30");
+                    label.setAttribute("y", yPos + 5);
+                    label.setAttribute("text-anchor", "end");
+                    label.setAttribute("class", "axis-label");
+                    
+                    // 根据不同的数据类型计算刻度值
+                    let scaleValue;
+                    if (this.streamConfig) {
+                        const range = this.streamConfig.max - this.streamConfig.min;
+                        scaleValue = this.streamConfig.min + (range * i / 10);
+                        
+                        // 格式化显示，避免小数过长
+                        if (scaleValue >= 100) {
+                            scaleValue = Math.round(scaleValue);
+                        } else if (scaleValue >= 10) {
+                            scaleValue = Math.round(scaleValue * 10) / 10;
+                        } else {
+                            scaleValue = Math.round(scaleValue * 100) / 100;
+                        }
+                    } else {
+                        scaleValue = i * 10; // 默认0-100
+                    }
+                    
+                    label.textContent = scaleValue;
+                    
+                    this.svg.appendChild(tick);
+                    this.svg.appendChild(label);
+                }
+                
+                // 创建路径元素
+                this.pathElement = document.createElementNS(this.svgNS, "path");
+                this.pathElement.setAttribute("class", "path path-main");
+                
+                this.avgPathElement = document.createElementNS(this.svgNS, "path");
+                this.avgPathElement.setAttribute("class", "path path-avg");
+                
+                // 添加元素到SVG
+                this.svg.appendChild(xAxis);
+                this.svg.appendChild(yAxis);
+                this.svg.appendChild(unitLabel);
+                this.svg.appendChild(this.avgPathElement);
+                this.svg.appendChild(this.pathElement);
+                
+                // 添加SVG到容器
+                this.container.appendChild(this.svg);
+                
+                // 添加图表信息提示框
+                this.tooltip = document.createElement('div');
+                this.tooltip.className = 'chart-tooltip';
+                this.tooltip.style.position = 'absolute';
+                this.tooltip.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+                this.tooltip.style.color = 'white';
+                this.tooltip.style.padding = '5px 10px';
+                this.tooltip.style.borderRadius = '4px';
+                this.tooltip.style.pointerEvents = 'none';
+                this.tooltip.style.display = 'none';
+                this.tooltip.style.zIndex = '1000';
+                this.container.style.position = 'relative';
+                this.container.appendChild(this.tooltip);
+                
+                // 添加鼠标移动事件以显示数据点信息
+                this.svg.addEventListener('mousemove', (e) => {
+                    if (this.data.length === 0) return;
+                    
+                    const rect = this.svg.getBoundingClientRect();
+                    const mouseX = e.clientX - rect.left;
+                    
+                    // 计算最接近的数据点
+                    const xRatio = (mouseX - 40) / (this.width - 60);
+                    const dataIndex = Math.min(
+                        Math.max(0, Math.floor(xRatio * this.data.length)),
+                        this.data.length - 1
+                    );
+                    
+                    if (dataIndex >= 0 && dataIndex < this.data.length) {
+                        const value = this.data[dataIndex];
+                        
+                        this.tooltip.style.display = 'block';
+                        this.tooltip.style.left = mouseX + 'px';
+                        this.tooltip.style.top = '10px';
+                        
+                        // 格式化显示值
+                        const formattedValue = typeof value === 'number' && value >= 100 
+                            ? Math.round(value) 
+                            : (typeof value === 'number' ? value.toFixed(2) : value);
+                            
+                        this.tooltip.innerHTML = '<div><strong>值:</strong> ' + formattedValue + ' ' + (this.streamConfig.unit || '') + '</div>' +
+                            '<div><strong>平均值:</strong> ' + (this.avgData[0] ? this.avgData[0].toFixed(2) : 'N/A') + ' ' + (this.streamConfig.unit || '') + '</div>';
+                    }
+                });
+                
+                this.svg.addEventListener('mouseleave', () => {
+                    this.tooltip.style.display = 'none';
+                });
+            }
+            
+            // 更新SVG尺寸
+            updateSVGSize() {
+                this.svg.setAttribute("width", this.width);
+                this.svg.setAttribute("height", this.height);
+                
+                // 更新坐标轴
+                const xAxis = this.svg.querySelector("line[y1='" + (this.height - 20) + "']");
+                if (xAxis) {
+                    xAxis.setAttribute("x2", this.width);
+                }
+                
+                const yAxis = this.svg.querySelector("line[x1='40']");
+                if (yAxis) {
+                    yAxis.setAttribute("y2", this.height - 20);
+                }
+            }
+            
+            // 更新数据 - 使用requestAnimationFrame优化渲染
+            updateData(newData, avgValue) {
+                // 添加新数据点
+                this.data = [...this.data, ...newData.map(item => item.value)];
+                
+                // 保持数据量在最大显示点数以内
+                if (this.data.length > this.maxDataPoints) {
+                    this.data = this.data.slice(this.data.length - this.maxDataPoints);
+                }
+                
+                // 更新平均值数据点
+                this.avgData = [avgValue];
+                
+                // 标记为需要更新
+                this.pendingUpdate = true;
+                
+                // 如果没有正在进行的动画帧，请求一个
+                if (!this.animationFrame) {
+                    this.animationFrame = requestAnimationFrame(() => this.animateChart());
+                }
+            }
+            
+            // 动画更新图表
+            animateChart() {
+                const now = performance.now();
+                
+                // 限制刷新率，最多每50ms刷新一次
+                if (this.pendingUpdate && (now - this.lastRenderTime > 50)) {
+                    this.redrawChart();
+                    this.lastRenderTime = now;
+                    this.pendingUpdate = false;
+                }
+                
+                this.animationFrame = null;
+                
+                // 如果仍有待更新，请求下一帧
+                if (this.pendingUpdate) {
+                    this.animationFrame = requestAnimationFrame(() => this.animateChart());
+                }
+            }
+            
+            // 重绘图表
+            redrawChart() {
+                if (this.data.length === 0) return;
+                
+                // 计算坐标
+                const points = this.data.map((value, index) => {
+                    const x = 40 + ((this.width - 60) * index / (this.maxDataPoints - 1));
+                    
+                    // 计算y坐标时考虑数据范围
+                    let normalizedValue;
+                    if (this.streamConfig) {
+                        // 将值映射到配置的范围内
+                        const min = this.streamConfig.min;
+                        const max = this.streamConfig.max;
+                        normalizedValue = (value - min) / (max - min) * 100;
+                    } else {
+                        normalizedValue = value; // 假设数据已经是0-100范围
+                    }
+                    
+                    const y = this.height - 20 - ((this.height - 40) * normalizedValue / 100);
+                    return x + ',' + y;
+                });
+                
+                // 生成路径 - 使用更高效的方式
+                if (points.length > 0) {
+                    const pathData = "M" + points.join(" L");
+                    this.pathElement.setAttribute("d", pathData);
+                }
+                
+                // 计算平均值线
+                if (this.avgData.length > 0) {
+                    const avgValue = this.avgData[0];
+                    
+                    // 将平均值映射到图表范围
+                    let normalizedAvg;
+                    if (this.streamConfig) {
+                        const min = this.streamConfig.min;
+                        const max = this.streamConfig.max;
+                        normalizedAvg = (avgValue - min) / (max - min) * 100;
+                    } else {
+                        normalizedAvg = avgValue;
+                    }
+                    
+                    const avgY = this.height - 20 - ((this.height - 40) * normalizedAvg / 100);
+                    const avgPathData = 'M40,' + avgY + ' L' + this.width + ',' + avgY;
+                    this.avgPathElement.setAttribute("d", avgPathData);
+                }
+            }
+            
+            // 清理
+            clear() {
+                this.data = [];
+                this.avgData = [];
+                this.pathElement.setAttribute("d", "");
+                this.avgPathElement.setAttribute("d", "");
+                
+                // 取消任何挂起的动画帧
+                if (this.animationFrame) {
+                    cancelAnimationFrame(this.animationFrame);
+                    this.animationFrame = null;
+                }
+                
+                this.pendingUpdate = false;
+            }
+        }
+        
+        // 日志函数
+        function log(message, level = 'info') {
+            const logConsole = document.getElementById('logConsole');
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log log-' + level;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            logEntry.textContent = '[' + timestamp + '] [' + level.toUpperCase() + '] ' + message;
+            
+            logConsole.appendChild(logEntry);
+            logConsole.scrollTop = logConsole.scrollHeight;
+            
+            // 限制日志数量
+            while (logConsole.children.length > 100) {
+                logConsole.removeChild(logConsole.firstChild);
+            }
+        }
+        
+        // 更新Worker状态UI
+        function updateWorkerStatusUI(status) {
+            const workerStatusContainer = document.getElementById('workerStatus');
+            workerStatusContainer.innerHTML = '';
+            
+            if (!status || !status.workers) return;
+            
+            status.workers.forEach(worker => {
+                const workerCard = document.createElement('div');
+                workerCard.className = 'col-md-3 col-sm-6 mb-3';
+                
+                const isBusy = worker.busy;
+                const statusClass = isBusy ? 'bg-warning' : 'bg-success';
+                const statusText = isBusy ? '处理中' : '空闲';
+                
+                let taskInfo = '';
+                if (isBusy && worker.currentTask) {
+                    taskInfo = '<div class="mt-1 small">处理 ' + worker.currentTask.dataType + ' 数据 (' + worker.currentTask.dataCount + '条)</div>';
+                }
+                
+                workerCard.innerHTML = 
+                    '<div class="card h-100 ' + (isBusy ? 'border-warning' : 'border-success') + '">' +
+                    '<div class="card-body text-center p-2">' +
+                    '<h5 class="card-title mb-1">Worker #' + worker.id + '</h5>' +
+                    '<span class="badge ' + statusClass + '">' + statusText + '</span>' +
+                    taskInfo +
+                    '</div>' +
+                    '</div>';
+                
+                workerStatusContainer.appendChild(workerCard);
+            });
+        }
+        
+        // 更新数据统计信息
+        function updateStatsUI(dataManager, workerPool) {
+            if (!dataManager || !workerPool) return;
+            
+            // 计算所有数据流的总处理量
+            let totalProcessed = 0;
+            let avgValue = 0;
+            let maxValue = 0;
+            let totalProcessedPerSecond = 0;
+            
+            // 获取数据类型
+            const dataTypes = dataManager.dataTypes;
+            let validTypesCount = 0;
+            
+            // 汇总统计
+            for (const dataType of dataTypes) {
+                if (!workerPool.streamStats[dataType]) continue;
+                
+                const streamStats = workerPool.streamStats[dataType];
+                const dataStats = dataManager.dataStreams[dataType];
+                
+                if (!streamStats || !dataStats) continue;
+                
+                totalProcessed += streamStats.totalProcessed || 0;
+                totalProcessedPerSecond += streamStats.processedPerSecond || 0;
+                
+                // 累加平均值和最大值
+                avgValue += dataStats.avgValue || 0;
+                if (dataStats.maxValue > maxValue) {
+                    maxValue = dataStats.maxValue;
+                }
+                
+                validTypesCount++;
+            }
+            
+            // 计算所有流的平均值
+            if (validTypesCount > 0) {
+                avgValue /= validTypesCount;
+            }
+            
+            // 更新UI
+            document.getElementById('totalProcessed').textContent = totalProcessed.toLocaleString();
+            document.getElementById('avgValue').textContent = avgValue.toFixed(2);
+            document.getElementById('maxValue').textContent = maxValue.toFixed(2);
+            document.getElementById('processSpeed').textContent = totalProcessedPerSecond.toLocaleString();
+        }
+        
+        // 主程序
+        document.addEventListener('DOMContentLoaded', () => {
+            // DOM元素
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            const workerCountInput = document.getElementById('workerCount');
+            const updateIntervalInput = document.getElementById('updateInterval');
+            const cacheStrategySelect = document.getElementById('cacheStrategy');
+            const errorSimulationCheck = document.getElementById('errorSimulation');
+            const importBtn = document.getElementById('importBtn');
+            const targetDashboardSelect = document.getElementById('targetDashboard');
+            const externalDataInput = document.getElementById('externalDataInput');
+            
+            // 系统组件
+            let dataManager = null;
+            let workerPool = null;
+            let visualizations = {};
+            let updateIntervals = {};
+            
+            // 看板配置信息
+            const dashboardConfigs = [
+                { id: 1, name: "CPU使用率", unit: "%" },
+                { id: 2, name: "内存使用率", unit: "%" },
+                { id: 3, name: "网络流量", unit: "MB/s" },
+                { id: 4, name: "磁盘IO", unit: "IOPS" },
+                { id: 5, name: "API响应时间", unit: "ms" }
+            ];
+            
+            // 更新总错误数显示
+            function updateTotalErrorsUI(workerPool) {
+                if (!workerPool) return;
+                
+                let totalErrors = 0;
+                for (const dataType of workerPool.dataTypes) {
+                    const stats = workerPool.streamStats[dataType];
+                    if (stats) {
+                        totalErrors += stats.errorCount;
+                    }
+                }
+                
+                document.getElementById('totalErrors').textContent = totalErrors;
+            }
+            
+            // 启动系统
+            function startSystem() {
+                // 获取参数
+                const workerCount = parseInt(workerCountInput.value);
+                const updateIntervalTime = parseInt(updateIntervalInput.value);
+                const cacheStrategy = cacheStrategySelect.value;
+                const simulateError = errorSimulationCheck.checked;
+                
+                // 验证参数
+                if (isNaN(workerCount) || workerCount < 1) {
+                    log('Worker数量必须大于0', 'error');
+                    return;
+                }
+                
+                if (isNaN(updateIntervalTime) || updateIntervalTime < 100) {
+                    log('更新间隔必须大于100ms', 'error');
+                    return;
+                }
+                
+                // 初始化组件
+                log('系统启动中...', 'info');
+                
+                // 创建数据管理器
+                dataManager = new DataManager(dashboardConfigs.length, 5000); // 5个看板，每个初始5000条数据
+                dataManager.setCacheStrategy(cacheStrategy);
+                
+                // 设置看板信息
+                dashboardConfigs.forEach((config, index) => {
+                    const dataType = `dataStream${index+1}`;
+                    dataManager.setDashboardInfo(dataType, config.name, config.unit);
+                });
+                
+                log('生成初始数据：5 个数据流, 每个 5000 条', 'info');
+                
+                // 创建Worker池
+                workerPool = new WorkerPool(workerCount, dataManager.dataTypes);
+                
+                // 创建可视化组件
+                for (let i = 0; i < dataManager.dataTypes.length; i++) {
+                    const dataType = dataManager.dataTypes[i];
+                    const containerId = `chartContainer${i+1}`;
+                    const dashboardInfo = dashboardConfigs[i];
+                    
+                    visualizations[dataType] = new VisualizationManager(containerId, dataType, {
+                        min: 0,
+                        max: 100,
+                        unit: dashboardInfo.unit
+                    });
+                    
+                    log(`初始化 ${dashboardInfo.name} 可视化组件`, 'info');
+                    
+                    // 监听数据更新
+                    dataManager.addListener(dataType, (newData, displayData, type) => {
+                        const streamStats = dataManager.getStreamStats(type);
+                        visualizations[type].updateData(newData, streamStats.avgValue);
+                    });
+                }
+                
+                // 监听Worker状态变化
+                workerPool.addStatusListener(status => {
+                    updateWorkerStatusUI(status);
+                    updateStatsUI(dataManager, workerPool);
+                    updateTotalErrorsUI(workerPool);
+                });
+                
+                // 启动Worker处理系统
+                workerPool.start();
+                
+                // 为每个数据流创建单独的更新间隔
+                for (const dataType of dataManager.dataTypes) {
+                    // 获取初始数据
+                    const initialData = dataManager.getAllData(dataType);
+                    
+                    // 将初始数据送入Worker处理
+                    workerPool.processData(dataType, initialData, simulateError);
+                    
+                    // 设置定时器生成新数据 - 使用统一的更新频率
+                    updateIntervals[dataType] = setInterval(() => {
+                        // 随机生成3-10条新数据点
+                        const newCount = Math.floor(Math.random() * 8) + 3;
+                        const newData = dataManager.generateNewData(dataType, newCount);
+                        
+                        // 交给Worker处理
+                        workerPool.processData(dataType, newData, simulateError);
+                    }, updateIntervalTime);
+                }
+                
+                // 更新UI
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                importBtn.disabled = false;
+                
+                log('系统已启动并开始处理数据', 'info');
+            }
+            
+            // 停止系统
+            function stopSystem() {
+                // 清除所有更新间隔
+                for (const dataType in updateIntervals) {
+                    if (updateIntervals[dataType]) {
+                        clearInterval(updateIntervals[dataType]);
+                        updateIntervals[dataType] = null;
+                    }
+                }
+                
+                if (workerPool) {
+                    workerPool.terminate();
+                    workerPool = null;
+                }
+                
+                for (const dataType in visualizations) {
+                    if (visualizations[dataType]) {
+                        visualizations[dataType].clear();
+                        visualizations[dataType] = null;
+                    }
+                }
+                
+                dataManager = null;
+                
+                // 更新UI
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                importBtn.disabled = true;
+                
+                log('系统已停止', 'info');
+            }
+            
+            // 导入外部数据
+            function importExternalData() {
+                if (!dataManager || !workerPool) {
+                    log('系统未启动，无法导入数据', 'error');
+                    return;
+                }
+                
+                try {
+                    // 获取目标看板
+                    const dashboardId = parseInt(targetDashboardSelect.value);
+                    const dataType = `dataStream${dashboardId}`;
+                    
+                    // 获取JSON数据
+                    const jsonText = externalDataInput.value.trim();
+                    if (!jsonText) {
+                        log('请输入有效的JSON数据', 'error');
+                        return;
+                    }
+                    
+                    // 解析JSON
+                    const parsedData = JSON.parse(jsonText);
+                    if (!Array.isArray(parsedData)) {
+                        log('数据必须是数组格式', 'error');
+                        return;
+                    }
+                    
+                    // 验证每个数据项是否有value字段
+                    const validData = parsedData.filter(item => item && typeof item.value !== 'undefined');
+                    if (validData.length === 0) {
+                        log('没有有效的数据项（每项必须有value字段）', 'error');
+                        return;
+                    }
+                    
+                    // 导入数据到系统
+                    const importedData = dataManager.importExternalData(dataType, validData);
+                    
+                    // 处理导入的数据
+                    workerPool.processData(dataType, importedData, false);
+                    
+                    const dashboardName = dashboardConfigs.find(d => d.id === dashboardId)?.name || dataType;
+                    log(`成功导入 ${importedData.length} 条数据到 ${dashboardName}`, 'info');
+                    
+                    // 清空输入框
+                    externalDataInput.value = '';
+                } catch (error) {
+                    log(`导入外部数据失败: ${error.message}`, 'error');
+                }
+            }
+            
+            // 添加事件监听器
+            startBtn.addEventListener('click', startSystem);
+            stopBtn.addEventListener('click', stopSystem);
+            importBtn.addEventListener('click', importExternalData);
+            importBtn.disabled = true; // 初始状态下禁用
+            
+            // 缓存策略变更监听
+            cacheStrategySelect.addEventListener('change', function() {
+                if (dataManager) {
+                    dataManager.setCacheStrategy(this.value);
+                }
+            });
+            
+            // 添加演示数据示例按钮
+            const addSampleButton = document.createElement('button');
+            addSampleButton.className = 'btn btn-sm btn-outline-info mt-2';
+            addSampleButton.textContent = '添加示例数据';
+            addSampleButton.addEventListener('click', () => {
+                const sampleData = [];
+                // 生成10个随机数据点
+                for (let i = 0; i < 10; i++) {
+                    sampleData.push({
+                        value: Math.random() * 100,
+                        timestamp: Date.now() + i * 100
+                    });
+                }
+                externalDataInput.value = JSON.stringify(sampleData, null, 2);
+            });
+            
+            // 插入到DOM中
+            const externalDataContainer = externalDataInput.parentElement;
+            externalDataContainer.appendChild(addSampleButton);
+            
+            // 初始日志
+            log('系统已初始化', 'info');
+            log('点击"开始处理"按钮启动系统', 'info');
+            log('系统采用统一数据处理逻辑，所有数据流使用FIFO队列处理', 'info');
+        });
+    </script>
+</body>
+</html> 
